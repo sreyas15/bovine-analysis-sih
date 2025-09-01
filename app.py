@@ -1,5 +1,5 @@
 # =============================================================================
-# SCRIPT: app.py (FINAL, COMPLETE, AND CORRECTED VERSION)
+# SCRIPT: app.py (FINAL, COMPLETE VERSION with Full Database)
 # =============================================================================
 import streamlit as st
 import torch
@@ -14,7 +14,7 @@ from ultralytics import YOLO
 import numpy as np
 
 # =============================================================================
-# 0. BREED INFORMATION DATABASE (Comprehensive Version with Underscores)
+# 0. BREED INFORMATION DATABASE (Comprehensive Version with Underscores and avg_length_cm)
 # =============================================================================
 breed_info_db = {
     "Alambadi": { "milk_yield": "Low (Draught Breed)", "weight_range": "Female: ~300 kg", "info": "A strong draught breed from Tamil Nadu.", "avg_length_cm": 125 },
@@ -111,7 +111,7 @@ breed_model, idx_to_breed, idx_to_type, health_model, health_class_names, segmen
 # =============================================================================
 # 3. DEFINE THE PREDICTION & MEASUREMENT FUNCTION
 # =============================================================================
-def analyze_image(image):
+def analyze_image(image, breed_model, health_model, segmentation_model, idx_to_breed, idx_to_type, health_class_names):
     # --- Classification ---
     transform = transforms.Compose([
         transforms.Resize((224, 224)),
@@ -149,7 +149,6 @@ def analyze_image(image):
             
             length_cm = w * pixel_to_cm
             height_cm = h * pixel_to_cm
-            
             p_weight_est = ((height_cm**2) * length_cm) / 10840 if length_cm > 0 else 0
 
     return p_type, p_breed, p_health, length_cm, height_cm, p_weight_est, debug_image
@@ -172,7 +171,9 @@ with tab1:
                 image = Image.open(uploaded_file).convert("RGB")
                 
                 with st.spinner(f'Analyzing {uploaded_file.name}...'):
-                    p_type, p_breed, p_health, p_len_cm, p_hgt_cm, p_wgt, debug_img = analyze_image(image)
+                    p_type, p_breed, p_health, p_len_cm, p_hgt_cm, p_wgt, debug_img = analyze_image(
+                        image, breed_model, health_model, segmentation_model, idx_to_breed, idx_to_type, health_class_names
+                    )
                     
                     col1, col2 = st.columns([1, 2])
                     with col1:
@@ -189,7 +190,7 @@ with tab1:
                         st.metric("Approx. Body Length", f"{p_len_cm:.2f} cm")
                         st.metric("Approx. Body Height", f"{p_hgt_cm:.2f} cm")
                         st.metric("Estimated Live Weight", f"~{p_wgt:.2f} kg")
-                        st.caption("Weight is dynamically estimated based on the predicted breed. Requires a clear, side-view image.")
+                        st.caption("Weight is dynamically estimated. Requires a clear, side-view image.")
 
                         st.divider()
                         st.info(f"**Breed Information Database**", icon="ℹ️")
@@ -204,4 +205,65 @@ with tab1:
 
 with tab2:
     st.header("Analyze a Video File")
-    st.info("Video analysis can be enabled in a future version.")
+    uploaded_video = st.file_uploader("Upload a video file...", type=["mp4", "mov", "avi"], key="video_uploader")
+
+    if uploaded_video:
+        st.video(uploaded_video)
+        
+        if st.button('Analyze Video', key="video_button"):
+            tfile = tempfile.NamedTemporaryFile(delete=False) 
+            tfile.write(uploaded_video.read())
+            
+            vf = cv2.VideoCapture(tfile.name)
+            fps = vf.get(cv2.CAP_PROP_FPS)
+            
+            st.info(f"Analyzing one frame per second from the video...")
+
+            all_results = []
+            frame_skip = int(fps) if fps > 0 else 30
+            
+            with st.spinner("Processing video... this may take a moment."):
+                frame_number = 0
+                while vf.isOpened():
+                    ret, frame = vf.read()
+                    if not ret: break
+                    
+                    if frame_number % frame_skip == 0:
+                        frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                        pil_image = Image.fromarray(frame_rgb)
+                        p_type, p_breed, p_health, _, _, _, _ = analyze_image(
+                            pil_image, breed_model, health_model, segmentation_model, idx_to_breed, idx_to_type, health_class_names
+                        )
+                        all_results.append((p_type, p_breed, p_health))
+                        
+                    frame_number += 1
+                vf.release()
+
+            st.success("Video analysis complete!")
+            
+            if all_results:
+                type_counts = Counter([res[0] for res in all_results])
+                breed_counts = Counter([res[1] for res in all_results])
+                health_counts = Counter([res[2] for res in all_results])
+
+                most_common_type = type_counts.most_common(1)[0]
+                most_common_breed = breed_counts.most_common(1)[0]
+                most_common_health = health_counts.most_common(1)[0]
+
+                st.subheader("Video Analysis Summary")
+                st.metric("Predominant Animal Type", most_common_type[0], f"Seen in {most_common_type[1]} of {len(all_results)} analyzed frames")
+                st.metric("Predominant Breed", most_common_breed[0], f"Seen in {most_common_breed[1]} of {len(all_results)} analyzed frames")
+                st.metric("Predominant Health Status", most_common_health[0], f"Seen in {most_common_health[1]} of {len(all_results)} analyzed frames")
+                
+                final_breed = most_common_breed[0]
+                st.divider()
+                st.info(f"**Breed Information for the Predominant Breed: {final_breed}**", icon="ℹ️")
+                if final_breed in breed_info_db:
+                    info = breed_info_db[final_breed]
+                    st.write(f"**Typical Milk Yield:** {info['milk_yield']}")
+                    st.write(f"**Typical Weight Range:** {info['weight_range']}")
+                    st.caption(info['info'])
+                else:
+                    st.warning("Breed info not in database.")
+            else:
+                st.warning("Could not extract any frames to analyze from the video.")
