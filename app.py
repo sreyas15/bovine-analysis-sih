@@ -107,7 +107,7 @@ def load_models():
     health_model.eval()
     
     segmentation_model_old = YOLO("best.pt")
-    segmentation_model_rump = YOLO("d:\\sih_2025\\best_rump.pt")
+    segmentation_model_rump = YOLO("best_rump.pt")
     return breed_model, idx_to_breed, idx_to_type, health_model, health_model_data["class_names"], segmentation_model_old, segmentation_model_rump
 
 # Preload all models once to avoid re-loading in analyze_image
