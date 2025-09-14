@@ -87,6 +87,8 @@ def create_health_model(num_classes=2):
 # =============================================================================
 # 2. LOAD ALL TRAINED MODELS
 # =============================================================================
+# ...existing code...
+
 @st.cache_resource
 def load_models():
     device = torch.device("cpu")
@@ -104,22 +106,23 @@ def load_models():
     health_model.load_state_dict(health_model_data["model_state"])
     health_model.eval()
     
-    segmentation_model = YOLO("best.pt")
-    return breed_model, idx_to_breed, idx_to_type, health_model, health_model_data["class_names"], segmentation_model
+    segmentation_model_old = YOLO("best.pt")
+    segmentation_model_rump = YOLO("d:\\sih_2025\\best_rump.pt")
+    return breed_model, idx_to_breed, idx_to_type, health_model, health_model_data["class_names"], segmentation_model_old, segmentation_model_rump
 
 # Preload all models once to avoid re-loading in analyze_image
-BREED_MODEL, IDX_TO_BREED, IDX_TO_TYPE, HEALTH_MODEL, HEALTH_CLASS_NAMES, SEGMENTATION_MODEL = load_models()
+BREED_MODEL, IDX_TO_BREED, IDX_TO_TYPE, HEALTH_MODEL, HEALTH_CLASS_NAMES, SEGMENTATION_MODEL_OLD, SEGMENTATION_MODEL_RUMP = load_models()
 
-# =============================================================================
-# 3. DEFINE THE PREDICTION & MEASUREMENT FUNCTION
-# =============================================================================
+# ...existing code...
+
 def analyze_image(image):
     breed_model = BREED_MODEL
     idx_to_breed = IDX_TO_BREED
     idx_to_type = IDX_TO_TYPE
     health_model = HEALTH_MODEL
     health_class_names = HEALTH_CLASS_NAMES
-    segmentation_model = SEGMENTATION_MODEL
+    segmentation_model_old = SEGMENTATION_MODEL_OLD
+    segmentation_model_rump = SEGMENTATION_MODEL_RUMP
 
     transform = transforms.Compose([
         transforms.Resize((224, 224)),
@@ -131,35 +134,42 @@ def analyze_image(image):
         breed_logits, type_logits = breed_model(image_tensor)
         p_type = idx_to_type[type_logits.argmax(1).item()]
         p_breed = idx_to_breed[breed_logits.argmax(1).item()]
-        
         health_logits = health_model(image_tensor)
         p_health = health_class_names[health_logits.argmax(1).item()]
 
-    results = segmentation_model(image)
+    # --- SEGMENTATION METRICS ---
+    results_old = segmentation_model_old(image)
     length_cm, height_cm, p_weight_est = 0, 0, 0
-    debug_image = image.copy()
-    draw = ImageDraw.Draw(debug_image)
+    chest_width_cm = 0
+    pixel_to_cm = 0.22
 
-    if results[0].masks is not None and len(results[0].masks) > 0:
-        mask = results[0].masks[0].data[0].cpu().numpy()
+    if results_old[0].masks is not None and len(results_old[0].masks) > 0:
+        mask = results_old[0].masks[0].data[0].cpu().numpy()
         mask_uint8 = (mask * 255).astype(np.uint8)
-        
         contours, _ = cv2.findContours(mask_uint8, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         if contours:
             x, y, w, h = cv2.boundingRect(contours[0])
-            draw.rectangle([x, y, x + w, y + h], outline="red", width=5)
-            
-            pixel_to_cm = 0.22
             if p_breed in breed_info_db and 'avg_length_cm' in breed_info_db[p_breed] and w > 0:
                 known_length = breed_info_db[p_breed]['avg_length_cm']
                 pixel_to_cm = known_length / w
-            
             length_cm = w * pixel_to_cm
             height_cm = h * pixel_to_cm
+            chest_width_cm = height_cm * 0.25
             p_weight_est = ((height_cm**2) * length_cm) / 10840 if length_cm > 0 else 0
 
-    return p_type, p_breed, p_health, length_cm, height_cm, p_weight_est, debug_image
+    # --- RUMP SEGMENTATION METRICS (for chest width only) ---
+    results_rump = segmentation_model_rump(image)
+    if results_rump[0].masks is not None and len(results_rump[0].masks) > 0:
+        mask_rump = results_rump[0].masks[0].data[0].cpu().numpy()
+        mask_rump_uint8 = (mask_rump * 255).astype(np.uint8)
+        contours_rump, _ = cv2.findContours(mask_rump_uint8, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        if contours_rump:
+            x, y, w, h = cv2.boundingRect(contours_rump[0])
+            chest_width_cm = (h * 0.25) * (breed_info_db[p_breed]['avg_length_cm'] / w if p_breed in breed_info_db and w > 0 else 0.22)
 
+    # Only return the metrics you want to show
+    return p_type, p_breed, p_health, length_cm, height_cm, chest_width_cm, p_weight_est
+# ...existing code...
 # =============================================================================
 # 4. PAGE CONFIGURATION AND STYLING
 # =============================================================================
@@ -638,6 +648,8 @@ if st.session_state.page == "home":
     <a id="demo"></a>
     """, unsafe_allow_html=True)
 
+# ...existing code...
+
 elif st.session_state.page == "demo":
     st.markdown('<h1 class="section-title">Try Our Advanced Bovine Analysis Tool</h1>', unsafe_allow_html=True)
     st.markdown("""
@@ -653,14 +665,12 @@ elif st.session_state.page == "demo":
         if st.button('Analyze Images', key="image_button", use_container_width=True):
             for uploaded_file in uploaded_files:
                 image = Image.open(uploaded_file).convert("RGB")
-                
                 with st.spinner(f'Analyzing {uploaded_file.name}...'):
-                    p_type, p_breed, p_health, p_len_cm, p_hgt_cm, p_wgt, debug_img = analyze_image(image)
+                    p_type, p_breed, p_health, p_len_cm, p_hgt_cm, p_chest_cm, p_wgt = analyze_image(image)
                     
                     col1, col2 = st.columns([1, 1])
                     with col1:
                         st.image(image, caption=f'Uploaded: {uploaded_file.name}', use_column_width=True)
-                        st.image(debug_img, caption=f'Model Detection Outline', use_column_width=True)
                     with col2:
                         st.success(f"AI Analysis for {uploaded_file.name}")
                         st.metric("Animal Type", p_type)
@@ -669,21 +679,27 @@ elif st.session_state.page == "demo":
                         
                         st.divider()
                         st.info("Automated Measurements & Estimations", icon="📏")
-                        st.metric("Approx. Body Length", f"{p_len_cm:.2f} cm")
-                        st.metric("Approx. Body Height", f"{p_hgt_cm:.2f} cm")
+                        st.metric("Body Length (Shoulder to Pin Bone)", f"{p_len_cm:.2f} cm")
+                        st.metric("Height at Withers", f"{p_hgt_cm:.2f} cm")
+                        st.metric("Chest Width (est.)", f"{p_chest_cm:.2f} cm")
                         st.metric("Estimated Live Weight", f"~{p_wgt:.2f} kg")
                         
                         st.divider()
                         st.info("Breed Information Database", icon="ℹ️")
                         if p_breed in breed_info_db:
                             info = breed_info_db[p_breed]
-                            st.write(f"Typical Milk Yield: {info['milk_yield']}")
-                            st.write(f"Typical Weight Range: {info['weight_range']}")
-                            st.caption(info['info'])
+                            # Make font bigger for breed info
+                            st.markdown(f"""
+                                <div style="font-size:1.3em;">
+                                    <b>Typical Milk Yield:</b> {info['milk_yield']}<br>
+                                    <b>Typical Weight Range:</b> {info['weight_range']}<br>
+                                    <span>{info['info']}</span>
+                                </div>
+                            """, unsafe_allow_html=True)
                         else:
                             st.warning("Breed info not in database.")
                 st.divider()
-
+# ...existing code...
 elif st.session_state.page == "about":
     st.markdown('<h1 class="section-title">About BovineAI Analytics</h1>', unsafe_allow_html=True)
     st.markdown("""
