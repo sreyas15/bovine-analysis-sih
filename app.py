@@ -132,10 +132,20 @@ def analyze_image(image):
     image_tensor = transform(image).unsqueeze(0)
     with torch.no_grad():
         breed_logits, type_logits = breed_model(image_tensor)
-        p_type = idx_to_type[type_logits.argmax(1).item()]
-        p_breed = idx_to_breed[breed_logits.argmax(1).item()]
+        breed_probs = torch.softmax(breed_logits, dim=1)
+        type_probs = torch.softmax(type_logits, dim=1)
+        breed_conf, breed_idx = torch.max(breed_probs, 1)
+        type_conf, type_idx = torch.max(type_probs, 1)
+        p_breed = idx_to_breed[breed_idx.item()]
+        p_type = idx_to_type[type_idx.item()]
         health_logits = health_model(image_tensor)
-        p_health = health_class_names[health_logits.argmax(1).item()]
+        health_probs = torch.softmax(health_logits, dim=1)
+        health_conf, health_idx = torch.max(health_probs, 1)
+        p_health = health_class_names[health_idx.item()]
+
+    # Set a threshold (e.g., 0.7)
+    BREED_CONF_THRESHOLD = 0.6
+    
 
     # --- SEGMENTATION METRICS ---
     results_old = segmentation_model_old(image)
@@ -143,7 +153,21 @@ def analyze_image(image):
     chest_width_cm = 0
     pixel_to_cm = 0.22
 
-    if results_old[0].masks is not None and len(results_old[0].masks) > 0:
+    # If breed/type/health confidence is low or no mask is detected, set all outputs to unknown/zero
+    mask_detected = results_old[0].masks is not None and len(results_old[0].masks) > 0
+
+    if breed_conf.item() < BREED_CONF_THRESHOLD or not mask_detected:
+        p_breed = "Unknown / Not a bovine"
+        p_type = "Unknown"
+        p_health = "Unknown"
+        return p_type, p_breed, p_health, 0, 0, 0, 0
+
+    if type_conf.item() < BREED_CONF_THRESHOLD:
+        p_type = "Unknown"
+    if health_conf.item() < BREED_CONF_THRESHOLD:
+        p_health = "Unknown"
+
+    if mask_detected:
         mask = results_old[0].masks[0].data[0].cpu().numpy()
         mask_uint8 = (mask * 255).astype(np.uint8)
         contours, _ = cv2.findContours(mask_uint8, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
@@ -167,8 +191,8 @@ def analyze_image(image):
             x, y, w, h = cv2.boundingRect(contours_rump[0])
             chest_width_cm = (h * 0.25) * (breed_info_db[p_breed]['avg_length_cm'] / w if p_breed in breed_info_db and w > 0 else 0.22)
 
-    # Only return the metrics you want to show
     return p_type, p_breed, p_health, length_cm, height_cm, chest_width_cm, p_weight_est
+
 # ...existing code...
 # =============================================================================
 # 4. PAGE CONFIGURATION AND STYLING
